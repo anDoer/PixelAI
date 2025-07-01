@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "PixelAI"
+version = "0.1.0"
+description = ""
+authors = ["Andreas Doering <16701672+anDoer@users.noreply.github.com>"]
+readme = "README.md"
+packages = [{include = "pixelai"}]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<4.0"
+numpy = "^2.1.2"
+torch = {version = "^2.6.0", source = "pytorch-cu124"}
+torchvision = {version = "^0.21.0", source = "pytorch-cu124"}
+matplotlib = "^3.10.3"
+scikit-learn = "^1.7.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+name = "PyPI"
+priority = "primary"
+
+[[tool.poetry.source]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+priority = "supplemental"

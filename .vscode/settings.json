@@ -1,0 +1,17 @@
+{
+    // PYTHON
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.venvPath": "${workspaceFolder}/.venv",
+    "python.terminal.activateEnvironment": true,
+    "python.formatting.provider": "black",
+    "python.analysis.extraPaths": ["./"],
+    // TERMINAL
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "terminal.integrated.env.linux": {
+        "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+        "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}"
+    },
+    "editor.formatOnSave": false,
+    "editor.lineNumbers": "relative",
+
+   
