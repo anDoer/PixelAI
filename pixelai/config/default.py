@@ -14,5 +14,39 @@ class RuntimeConfig:
     enable_bucketing: bool = False
 
     # training config 
-    batch_size: int = 4 
+    train_batch_size: int = 4 
+    num_epochs: int = 100
+    max_num_samples: Optional[int] = None  # total number of samples to train on
+                                           # if set, overrides the num epochs
     num_workers: int = 0
+    gradient_acuumulation_steps: int = 1
+    mixed_precision: str = 'no'  # 'no', 'fp16', 'bf16'
+    seed: int = 42
+
+    learning_rate: float = 1e-4
+    optimizer: str = 'adamw'  # 'adamw'
+
+    # lr scheduler
+    num_warmup_steps: int = 1000
+    scheduler_name: str = 'linear'  # 'linear', 'cosine', 'constant'
+    num_scheduler_cycles: Optional[int] = None  # None for no cycles, or an integer for number of cycles
+
+    # i/o 
+    dataset_path: str = '~/Data/Datasets/AIPixel'
+    save_path: str = 'output/train/'
+    logging_dir: str = 'logs'
+
+    # model config 
+    patch_size: int = 1
+    in_channels: int = 3
+    num_layers: int = 12
+    attention_head_dim: int = 128
+    num_attention_heads: int = 24
+    axes_dims_rope: Tuple[int, int, int] = (16, 56, 56) # the sum is supposed to be 128 to be attention_head_dim! 
+
+    # optimizer config 
+    # AdamW
+    adamw_betas: Tuple[float, float] = (0.9, 0.999)
+    adamw_weight_decay: float = 1e-2
+    adamw_eps: float = 1e-8
+    

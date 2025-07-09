@@ -31,7 +31,7 @@ class Dataset(Dataset):
     def load_data(self):
 
         game_folder_idx = 0
-        for game_folder in self.data_path.iterdir():
+        for game_folder in self.data_path.expanduser().iterdir():
             if not game_folder.is_dir():
                 continue
 
@@ -118,6 +118,20 @@ class Dataset(Dataset):
 
         return cluster_sizes, cluster_mapping, cluster_stats
         
+def get_dataloader():
+    dataset = Dataset(data_path=RuntimeConfig.dataset_path)
+    
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=RuntimeConfig.train_batch_size,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=RuntimeConfig.num_workers,
+        collate_fn=default_collate
+    )
+
+    return dataloader
+
 if __name__ == '__main__':
     dataset = Dataset(data_path='/home/doering/Data/Datasets/AIPixel')
 

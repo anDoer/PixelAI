@@ -13,6 +13,9 @@ torch = {version = "^2.6.0", source = "pytorch-cu124"}
 torchvision = {version = "^0.21.0", source = "pytorch-cu124"}
 matplotlib = "^3.10.3"
 scikit-learn = "^1.7.0"
+diffusers = "^0.34.0"
+accelerate = "^1.8.1"
+tensorboard = "^2.19.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
