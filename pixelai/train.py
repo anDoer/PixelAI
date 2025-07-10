@@ -29,7 +29,7 @@ def setup_accelerator(logging_dir: Path):
                                                       logging_dir=logging_dir)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
-        gradient_accumulation_steps=RuntimeConfig.gradient_acuumulation_steps,
+        gradient_accumulation_steps=RuntimeConfig.gradient_accumulation_steps,
         mixed_precision=RuntimeConfig.mixed_precision,
         log_with="tensorboard",
         project_config=accelerator_project_config,
@@ -119,13 +119,11 @@ def get_lr_scheduler(optimizer,
 
 def get_sigmas_for_training(scheduler: FlowMatchEulerDiscreteScheduler,
                             timesteps: torch.Tensor,
-                            accelerator: Accelerator,
-                            weight_dtype,
                             n_dim: int = 4):
 
-    scheduler_sigmas = scheduler.sigmas.to(accelerator.device, dtype=weight_dtype)
-    scheduler_timesteps = scheduler.timesteps.to(accelerator.device, dtype=weight_dtype)
-    timesteps = timesteps.to(accelerator.device)
+    scheduler_sigmas = scheduler.sigmas
+    scheduler_timesteps = scheduler.timesteps
+    timesteps = timesteps
 
     # obtain the indices of sampled timesteps
     indices = [(scheduler_timesteps == t).nonzero().item() for t in timesteps]
@@ -142,18 +140,32 @@ def sample_timesteps_logit_normal_density(logit_mean: float,
                                           batch_size: int,
                                           generator: torch.Generator,
                                           noise_scheduler: FlowMatchEulerDiscreteScheduler,
-                                          device):
+                                          ):
 
     # sample u from a logit-normal distribution
-    u = torch.normal(mean=logit_mean, std=logit_std, size=(batch_size,), device=device, generator=generator)
+    u = torch.normal(mean=logit_mean, std=logit_std, size=(batch_size,), generator=generator)
     u = torch.nn.functional.sigmoid(u)
 
     # obtain the indices of sampled timesteps
     timestep_indices = (u * noise_scheduler.num_train_timesteps).long()
-    sampled_timesteps = noise_scheduler.timesteps[timestep_indices].to(device=device)
+    sampled_timesteps = noise_scheduler.timesteps[timestep_indices]
 
     return sampled_timesteps
 
+def compute_loss(model_pred: torch.Tensor,
+                 target: torch.Tensor,
+                 sigmas: torch.Tensor):
+    
+    # compute loss weighting
+    if RuntimeConfig.loss_weighting_scheme == 'sigma_squared':
+        loss_weight = (sigmas ** -2).float()
+    else:
+        loss_weight = torch.ones_like(sigmas)
+
+    loss = loss_weight * (model_pred.float() - target.float()) ** 2
+    loss = loss.reshape(loss.shape[0], -1).mean(dim=1).mean()
+
+    return loss
     
 def run_train():
     args = parse_args() 
@@ -202,7 +214,7 @@ def run_train():
     )
 
     # Recalculate the total numer of training steps
-    num_steps_per_epoch = math.ceil(len(dataloader) / RuntimeConfig.gradient_acuumulation_steps)
+    num_steps_per_epoch = math.ceil(len(dataloader) / RuntimeConfig.gradient_accumulation_steps)
     if RuntimeConfig.max_num_samples is None:
         RuntimeConfig.max_num_samples = RuntimeConfig.num_epochs * num_steps_per_epoch
 
@@ -210,14 +222,14 @@ def run_train():
 
     total_batch_size = (RuntimeConfig.train_batch_size *
                         accelerator.num_processes *
-                        RuntimeConfig.gradient_acuumulation_steps) 
+                        RuntimeConfig.gradient_accumulation_steps) 
 
     logger.info("****** Running training ******")
     logger.info(f"  Num Epochs = {RuntimeConfig.num_epochs}")
     logger.info(f"  Num Steps per Epoch = {num_steps_per_epoch}")
     logger.info(f"  Total Batch Size = {total_batch_size}")
     logger.info(f"  Max Num Samples = {RuntimeConfig.max_num_samples}")
-    logger.info(f"  Gradient Accumulation Steps = {RuntimeConfig.gradient_acuumulation_steps}")
+    logger.info(f"  Gradient Accumulation Steps = {RuntimeConfig.gradient_accumulation_steps}")
     logger.info("******************************")
 
     global_step = 0
@@ -227,20 +239,108 @@ def run_train():
     initial_global_step = global_step
     
     progress_bar = tqdm(
-        range(0, RuntimeConfig.num_epochs),
+        range(0, RuntimeConfig.max_num_samples),
         initial=initial_global_step,
         desc='Steps',
         disable=not accelerator.is_main_process,
     )
 
-    import pdb; pdb.set_trace()
+    # initialize the scheduler
+    scheduler = FlowMatchEulerDiscreteScheduler(num_train_timesteps=RuntimeConfig.num_train_timesteps,
+                                                shift=RuntimeConfig.scale_shift)
+
+    generator = torch.Generator().manual_seed(RuntimeConfig.seed)
 
     for epoch in range(first_epoch, RuntimeConfig.num_epochs):
         transformer.train()
 
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(transformer):
-                import pdb; pdb.set_trace() 
+                images = batch['images']
+
+                image_sizes = batch['image_sizes'].to(dtype=weight_dtype)
+                original_sizes = batch['original_sizes'].to(dtype=weight_dtype)
+                image_offsets = batch['image_offsets'].to(dtype=weight_dtype)
+
+                # TODO: encode this as additional condition similar to what has been done in SDXL
+                #       or think about a better method!
+                image_size_condition = torch.cat([image_sizes, original_sizes, image_offsets], dim=-1)
+
+                # prepare the image ids
+                image_ids = PixelTransformer._prepare_latent_image_ids(
+                    height=images.shape[2],
+                    width=images.shape[3],
+                    device=accelerator.device,
+                    dtype=weight_dtype
+                )
+
+                # sample random noise
+                noise = torch.randn(images.shape, generator=generator)
+
+                # sample random timesteps 
+                timesteps = sample_timesteps_logit_normal_density(
+                   logit_mean=RuntimeConfig.sampling_logit_mean,
+                   logit_std=RuntimeConfig.sampling_logit_std,
+                   batch_size=images.shape[0],
+                   generator=generator, 
+                   noise_scheduler=scheduler,
+                )
+
+                # obtain corresponding sigmas
+                sigmas = get_sigmas_for_training(
+                    scheduler=scheduler,
+                    timesteps=timesteps,
+                    n_dim=images.ndim
+                )
+
+                # move to gpu
+                sigmas = sigmas.to(accelerator.device)
+                noise = noise.to(accelerator.device)
+
+                # add noie following flow matching
+                noisy_input = ( 1.0 - sigmas) * images + sigmas * noise
+                noisy_input = noisy_input.to(dtype=weight_dtype)
+                
+                # flow matching target
+                target = noise - images
+                
+                # pack
+                noisy_input_packed = PixelTransformer._pack_latents(
+                    latents=noisy_input,
+                    patch_size=RuntimeConfig.patch_size
+                )
+
+                model_pred = transformer(
+                    hidden_states=noisy_input_packed,
+                    timestep=timesteps.to(accelerator.device),
+                    img_ids=image_ids)
+
+                # unpack
+                model_pred = PixelTransformer._unpack_latents(
+                    latents=model_pred,
+                    height=images.shape[2],
+                    width=images.shape[3],
+                    patch_size=RuntimeConfig.patch_size
+                )
+
+                loss = compute_loss(
+                    model_pred=model_pred,
+                    target=target,
+                    sigmas=sigmas)
+
+                # TODO: clip grad norm here 
+                
+                accelerator.backward(loss)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+
+            if accelerator.sync_gradients:
+                progress_bar.update(1)
+                global_step += 1
+
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            progress_bar.set_postfix(**logs)
 
     ## Debugging
     #test_input = torch.randn(1, 3, 24, 28).to(accelerator.device, dtype=weight_dtype)

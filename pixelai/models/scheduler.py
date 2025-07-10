@@ -9,7 +9,7 @@ class FlowMatchEulerDiscreteScheduler:
         
         self.num_train_timesteps = num_train_timesteps
 
-        timesteps = np.linspace(0, num_train_timesteps, dtype=np.float32)
+        timesteps = np.linspace(1, num_train_timesteps, num_train_timesteps, dtype=np.float32)
         timesteps = timesteps[::-1].copy()
         timesteps = torch.from_numpy(timesteps).to(dtype=torch.float32)
 
@@ -19,8 +19,6 @@ class FlowMatchEulerDiscreteScheduler:
         # recalculate adjusted timesteps
         self.timesteps = sigmas * num_train_timesteps
         self.sigmas = sigmas.to("cpu")
-
-        import pdb; pdb.set_trace()
 
         
 if __name__ == '__main__':

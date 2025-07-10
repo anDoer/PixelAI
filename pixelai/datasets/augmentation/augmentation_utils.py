@@ -37,7 +37,7 @@ def resize_with_aspect_ratio(image: Image.Image,
     x_offset = (target_width - new_width) // 2
     y_offset = (target_height - new_height) // 2
 
-    meta = dict(original_size=(new_width, new_width),
+    meta = dict(original_size=(new_width, new_height),
                 target_size=target_size,
                 offsets=(x_offset, y_offset))
     

@@ -120,7 +120,7 @@ class PixelTransformer(nn.Module):
                 ) -> torch.Tensor:
         
         hidden_states = self.input_embed(hidden_states)
-        timestep = timestep.to(hidden_states.dtype) * 1000
+        timestep = timestep.to(hidden_states.dtype)
 
         if self.num_classes:
             temb = self.time_embed(timestep, conditions)
@@ -139,4 +139,4 @@ class PixelTransformer(nn.Module):
         hidden_states = self.norm_out(hidden_states, temb)
         output = self.proj_out(hidden_states)
 
-        return (output,)
+        return output

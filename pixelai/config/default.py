@@ -14,17 +14,18 @@ class RuntimeConfig:
     enable_bucketing: bool = False
 
     # training config 
-    train_batch_size: int = 4 
+    train_batch_size: int = 8 
     num_epochs: int = 100
     max_num_samples: Optional[int] = None  # total number of samples to train on
                                            # if set, overrides the num epochs
     num_workers: int = 0
-    gradient_acuumulation_steps: int = 1
-    mixed_precision: str = 'no'  # 'no', 'fp16', 'bf16'
+    gradient_accumulation_steps: int = 1
+    mixed_precision: str = 'bf16'  # 'no', 'fp16', 'bf16'
     seed: int = 42
 
     learning_rate: float = 1e-4
     optimizer: str = 'adamw'  # 'adamw'
+    loss_weighting_scheme: str = 'none' # 'sigma_squared', 'none'
 
     # lr scheduler
     num_warmup_steps: int = 1000
@@ -50,3 +51,9 @@ class RuntimeConfig:
     adamw_weight_decay: float = 1e-2
     adamw_eps: float = 1e-8
     
+    # Flow Matching Scheduler
+    num_train_timesteps: int = 1000
+    scale_shift: float = 1.0  # for FlowMatchEulerDiscreteScheduler
+    # parameters for logit normal sampling
+    sampling_logit_mean: float = 0.0
+    sampling_logit_std: float = 1.0  # std for logit normal sampling
