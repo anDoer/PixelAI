@@ -1,7 +1,9 @@
 import torch
+import os
 import math
 import logging
 import argparse
+import shutil
 
 from tqdm import tqdm
 from pathlib import Path
@@ -9,6 +11,7 @@ from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration, DistributedDataParallelKwargs, set_seed
 
 from diffusers.optimization import get_scheduler
+from safetensors.torch import save_file, load_file
 
 from pixelai.utils.logging import get_logger
 from pixelai.models.pixel_model import PixelTransformer
@@ -42,14 +45,34 @@ def prepare_hooks(accelerator,
                   logger: logging.Logger):
     
     def save_model_hook(models, weights, output_dir):
-        pass 
+        import pdb; pdb.set_trace()
+        if accelerator.is_main_process:
+            logger.info(f"Saving model state to {output_dir}...")
+
+            # Save the state of the model
+            for model in models:
+                if isinstance(model, PixelTransformer):
+                    # Save the model state using safetensors
+                    save_file(accelerator.unwrap_model(model).state_dict(), Path(output_dir, 'transformer.safetensors'))
+                else:
+                    logger.warning(f"Model {model} is not a PixelTransformer, skipping save.")
+
+                weights.pop()
     
     def load_model_hook(models, input_dir):
-        pass 
+        for _ in range(len(models)):
+            # remove from list so models are not loaded again
+            model = models.pop()
+
+            if isinstance(model, PixelTransformer):
+                state_dict = load_file(Path(input_dir, 'transformer.safetensors'))
+                model.load_state_dict(state_dict)
+
+                del state_dict
 
     logger.info("Registering save and load state hooks for the model...")
-    accelerator.register_save_state_hook(save_model_hook)
-    accelerator.register_load_state_hook(load_model_hook)
+    accelerator.register_save_state_pre_hook(save_model_hook)
+    accelerator.register_load_state_pre_hook(load_model_hook)
 
 def initialize_model(logger: logging.Logger,
                      accelerator: Accelerator,
@@ -194,6 +217,9 @@ def run_train():
     elif RuntimeConfig.mixed_precision == 'bf16':
         weight_dtype = torch.bfloat16
 
+    # prepare hooks for saving and loading model state
+    prepare_hooks(accelerator,
+                  logger=logger)
 
     # initialize the transformer model
     transformer = initialize_model(logger, accelerator, weight_dtype=weight_dtype)
@@ -235,13 +261,30 @@ def run_train():
     global_step = 0
     first_epoch = 0
 
-    # TODO: Potential loading of model and states
+    if RuntimeConfig.resume_from is not None:
+        if RuntimeConfig.resume_from != 'last':  
+            ckpt = Path(RuntimeConfig.resume_from)
+        else:
+            existing_ckpts = sorted(Path(RuntimeConfig.save_path, 'checkpoints').glob('checkpoint-*'))
+            ckpt = Path('last') if len(existing_ckpts) == 0 else existing_ckpts[-1]
+
+        ckpt_path = os.path.join(RuntimeConfig.save_path, 'checkpoints', ckpt.name)
+        if not os.path.exists(ckpt_path):
+
+            logger.warning(f"Checkpoint {ckpt_path} does not exist, starting from scratch.")
+            global_step = 0
+        else:
+            logger.info(f"Loading checkpoint from {ckpt_path}...")
+            accelerator.load_state(ckpt_path)
+            global_step = int(ckpt.name.split('-')[1])
+            first_epoch = global_step // num_steps_per_epoch
+
     initial_global_step = global_step
     
     progress_bar = tqdm(
         range(0, RuntimeConfig.max_num_samples),
         initial=initial_global_step,
-        desc='Steps',
+        desc=f'Epoch [{first_epoch}/{RuntimeConfig.num_epochs}] Steps',
         disable=not accelerator.is_main_process,
     )
 
@@ -253,6 +296,8 @@ def run_train():
 
     for epoch in range(first_epoch, RuntimeConfig.num_epochs):
         transformer.train()
+
+        progress_bar.set_description(f'Epoch [{epoch}/{RuntimeConfig.num_epochs}] Steps')
 
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(transformer):
@@ -328,9 +373,11 @@ def run_train():
                     target=target,
                     sigmas=sigmas)
 
-                # TODO: clip grad norm here 
-                
                 accelerator.backward(loss)
+
+                if accelerator.sync_gradients and RuntimeConfig.gradient_clipping is not None:
+                    accelerator.clip_grad_norm_(transformer.parameters(), 
+                                                max_norm=RuntimeConfig.gradient_clipping)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -339,8 +386,47 @@ def run_train():
                 progress_bar.update(1)
                 global_step += 1
 
+                if accelerator.is_main_process:
+                    if global_step % RuntimeConfig.checkpointing_interval == 0:
+                        if RuntimeConfig.checkpoint_total_limit is not None:
+                            checkpoint_dirs = Path(RuntimeConfig.save_path, 'checkpoints').glob('checkpoint-*')
+                            checkpoint_dirs = sorted(checkpoint_dirs, key=lambda x: int(x.name.split('-')[1]))
+
+                            if len(checkpoint_dirs) >= RuntimeConfig.checkpoint_total_limit:
+                                num_to_remove = len(checkpoint_dirs) - RuntimeConfig.checkpoint_total_limit + 1
+                                ckpts_to_remove = checkpoint_dirs[:num_to_remove]
+
+                                logger.info(f"{len(checkpoint_dirs)} checkpoints found, removing {num_to_remove} oldest checkpoints.")
+                                logger.info(f"removed checkpoints: {', '.join(ckpts_to_remove)}")
+
+                                for ckpt_path in ckpts_to_remove:
+                                    shutil.rmtree(ckpt_path)
+                        
+                        save_path = Path(RuntimeConfig.save_path, 'checkpoints', f'checkpoint-{global_step}')
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved checkpoint to {save_path}")
+
+
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
+            accelerator.log(logs, step=global_step)
+
+            if global_step >= RuntimeConfig.max_num_samples:
+                logger.info("Reached max number of samples, stopping training.")
+                break
+
+        # we finished an epoch, we can run validation now
+        if accelerator.is_main_process:
+            # TODO: implement and run the validation pipeline!
+            pass
+
+    logger.info("Training finished.")
+
+    # TODO: Save the final model
+    # TODO: run inference
+
+    accelerator.end_training()
+
 
     ## Debugging
     #test_input = torch.randn(1, 3, 24, 28).to(accelerator.device, dtype=weight_dtype)

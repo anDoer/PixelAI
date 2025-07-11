@@ -22,10 +22,14 @@ class RuntimeConfig:
     gradient_accumulation_steps: int = 1
     mixed_precision: str = 'bf16'  # 'no', 'fp16', 'bf16'
     seed: int = 42
+    gradient_clipping: Optional[float] = None
 
     learning_rate: float = 1e-4
     optimizer: str = 'adamw'  # 'adamw'
     loss_weighting_scheme: str = 'none' # 'sigma_squared', 'none'
+
+    checkpointing_interval: int = 10000
+    checkpoint_total_limit: Optional[int] = 10  # None for no limit, or an integer for the number of checkpoints to keep
 
     # lr scheduler
     num_warmup_steps: int = 1000
@@ -36,6 +40,8 @@ class RuntimeConfig:
     dataset_path: str = '~/Data/Datasets/AIPixel'
     save_path: str = 'output/train/'
     logging_dir: str = 'logs'
+
+    resume_from: Optional[str] = 'last'  # Path to a checkpoint to resume training from
 
     # model config 
     patch_size: int = 1
