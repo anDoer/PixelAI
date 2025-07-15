@@ -1,30 +1,32 @@
 import torch
 import argparse
 
+from tqdm import tqdm
 from typing import Tuple, Optional, List, Union
 from safetensors.torch import load_file
+from PIL import Image
 
 from pixelai.config.default import RuntimeConfig
 from pixelai.utils.logging import get_logger
-from pixelai.models.pixel_model import PixelAIModel
+from pixelai.models.pixel_model import PixelTransformer
 from pixelai.models.scheduler import FlowMatchEulerDiscreteScheduler
 
 class InferencePipeline:
     def __init__(self, 
-                 model: Union[str, PixelAIModel],
+                 model: Union[str, PixelTransformer],
                  device = None,
                  weight_dtype = None,
                  **model_kwargs):
         
         self.logger = get_logger(__name__)
 
-        if isinstance(model, PixelAIModel):
+        if isinstance(model, PixelTransformer):
             self.transformer = model
         else:
             self.logger.info(f"Loading model from {model}")
             state_dict = load_file(model)
 
-            self.transformer = PixelAIModel(
+            self.transformer = PixelTransformer(
                 patch_size=RuntimeConfig.patch_size if 'patch_size' not in model_kwargs else model_kwargs['patch_size'],
                 in_channels=RuntimeConfig.in_channels if 'in_channels' not in model_kwargs else model_kwargs['in_channels'],
                 num_layers=RuntimeConfig.num_layers if 'num_layers' not in model_kwargs else model_kwargs['num_layers'],
@@ -35,15 +37,17 @@ class InferencePipeline:
 
             self.transformer.load_state_dict(state_dict)
 
-        if device:
+        if device is None:
             self.transformer.to(device)
         if weight_dtype:
             self.transformer.to(dtype=weight_dtype)
 
         self.scheduler = FlowMatchEulerDiscreteScheduler(
             num_train_timesteps=RuntimeConfig.num_train_timesteps,
-            shift=RuntimeConfig.shift
+            shift=RuntimeConfig.scale_shift
         )
+
+        self.logger.info("Inference pipeline initialized with model and scheduler.")
 
 
     def run(self,
@@ -53,13 +57,16 @@ class InferencePipeline:
             num_inference_steps: int = 50,
             seed: Optional[int] = None,
             output_path: str = 'output/inference/',
+            device: Union[str, torch.device] = 'cuda',
+            dtype: torch.dtype = torch.float32,
             generator: Optional[torch.Generator] = None) -> List[torch.Tensor]:
 
         width, height = image_size 
 
-        generator = torch.Generator() 
-        if seed:
-            generator.manual_seed(seed)
+        if generator is None:
+            generator = torch.Generator(device=device) 
+            if seed:
+                generator.manual_seed(seed)
 
         # generate latents 
         self.logger.info(f"Generating {num_samples} samples with image size {image_size} and batch size {batch_size}")
@@ -67,12 +74,68 @@ class InferencePipeline:
 
         output_images = []
 
+        # adjust the timesteps according to the number of inferecne steps
+        # this function considers the schedule shift 
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps)
 
         for b_idx in range(num_batches):
             self.logger.info(f"Processing batch {b_idx + 1}/{num_batches}")
 
-            latents = torch.randn((batch_size, 3, height, width))
-            packed_latents = PixelAIModel.pack_latents(latents)
+            latents = torch.randn((batch_size, 3, height, width), device=device, dtype=dtype, generator=generator)
 
+            image_ids = PixelTransformer._prepare_latent_image_ids(
+                height=height,
+                width=width,
+                device=latents.device,
+                dtype=latents.dtype
+            )
+
+            sample = PixelTransformer._pack_latents(latents,
+                                                    patch_size=RuntimeConfig.patch_size)
+
+            self.scheduler.set_begin_index(0)
+
+            with tqdm(total=len(self.scheduler.timesteps), desc="Inference Progress") as progress_bar:
+                for t_idx, timestep in enumerate(self.scheduler.timesteps):
+                    
+                    timestep = timestep.expand(latents.shape[0]).to(latents.device)
+
+                    model_output = self.transformer(
+                        hidden_states=sample,
+                        timestep=timestep,
+                        img_ids=image_ids,
+                    )
+
+                    # update the sample using the scheduler
+                    sample = self.scheduler.step(
+                        model_output=model_output,
+                        timestep=timestep,
+                        sample=sample
+                    )
+
+                    progress_bar.update(1)
+            
+            # unpack the latents to images
+            images = PixelTransformer.unpack_latents(
+                latents=sample,
+                height=height,
+                width=width,
+                patch_size=RuntimeConfig.patch_size
+            )
+
+            # Convert images to PIL format
+            images = images.to("cpu", dtype=torch.float32)
+            images = images.clamp(-1, 1)
+            images = (images + 1) / 2.0
+            images = images.permute(0, 2, 3, 1)
+            images = (images * 255).to(torch.uint8)
+            images = images.numpy()
+            images = [Image.fromarray(image) for image in images]
+
+            output_images += images
+
+        # Save images to output path
+        self.logger.info(f"Saving output images to {output_path}")
+        for idx, image in enumerate(output_images):
+            image.save(f"{output_path}/image_{idx + 1}.png")
 

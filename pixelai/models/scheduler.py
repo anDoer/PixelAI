@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 from typing import Optional, List, Union
 
@@ -9,6 +10,7 @@ class FlowMatchEulerDiscreteScheduler:
                  shift=1.0):
         
         self.num_train_timesteps = num_train_timesteps
+        self.shift = shift
 
         timesteps = np.linspace(1, num_train_timesteps, num_train_timesteps, dtype=np.float32)
         timesteps = timesteps[::-1].copy()
@@ -22,6 +24,16 @@ class FlowMatchEulerDiscreteScheduler:
         self.sigmas = sigmas.to("cpu")
 
         self._step_index = None
+        self._begin_index = None
+    
+    def set_begin_index(self, begin_index: int):
+        self._begin_index = begin_index
+
+    def _initialize_step_index(self, timestep: Union[int, torch.IntTensor, torch.LongTensor]):
+        if self._begin_index is not None:
+            self._step_index = self._begin_index
+        else:
+            raise NotImplementedError("Begin index is not set. Please set it using 'set_begin_index' method before calling 'step'.")
 
     def set_timesteps(self,
                       num_inference_steps: Optional[int] = None,
@@ -60,11 +72,29 @@ class FlowMatchEulerDiscreteScheduler:
 
     def step(self,
              model_output: torch.Tensor,
-             timestep: Union[float, torch.FloatTensor],
+             timestep: Union[int, torch.IntTensor, torch.LongTensor],
              sample: torch.Tensor,
              stochastic_sampling: bool = False):
 
-        pass
+        if self._step_index is None:
+            self._initialize_step_index(timestep)
+
+        # avoid precision issues
+        sample = sample.to(dtype=torch.float32)
+
+        sigma = self.sigmas[self._step_index]
+        sigma_next = self.sigmas[self._step_index + 1]
+
+        dt = (sigma_next - sigma).to(model_output.device)
+
+        prev_sample = sample + dt * model_output
+        
+        # cast back to the original dtype of the model output
+        prev_sample = prev_sample.to(dtype=model_output.dtype)
+
+        self._step_index += 1
+        
+        return prev_sample
         
 if __name__ == '__main__':
     scheduler = FlowMatchEulerDiscreteScheduler()

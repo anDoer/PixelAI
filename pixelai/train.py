@@ -18,6 +18,7 @@ from pixelai.models.pixel_model import PixelTransformer
 from pixelai.datasets.data_reader import get_dataloader
 from pixelai.config.default import RuntimeConfig
 from pixelai.models.scheduler import FlowMatchEulerDiscreteScheduler
+from pixelai.inference.pixelai_pipeline import InferencePipeline
 
 
 def parse_args():
@@ -294,6 +295,9 @@ def run_train():
 
     generator = torch.Generator().manual_seed(RuntimeConfig.seed)
 
+    # Initialize validation pipeline
+    inference_pipeline = InferencePipeline(model=accelerator.unwrap_model(transformer))
+
     for epoch in range(first_epoch, RuntimeConfig.num_epochs):
         transformer.train()
 
@@ -405,7 +409,24 @@ def run_train():
                         save_path = Path(RuntimeConfig.save_path, 'checkpoints', f'checkpoint-{global_step}')
                         accelerator.save_state(save_path)
                         logger.info(f"Saved checkpoint to {save_path}")
+                    
+                    if global_step % RuntimeConfig.inference_evaluation_interval == 0:
+                        logger.info(f"Running inference at step {global_step}...")
+                        # try to free some cuda cache
+                        torch.cuda.empty_cache()
+                        inference_pipeline.run(
+                            image_size=RuntimeConfig.default_train_image_size,
+                            num_samples=RuntimeConfig.inference_num_samples,
+                            batch_size=RuntimeConfig.inference_batch_size,
+                            num_inference_steps=RuntimeConfig.inference_num_steps,
+                            device= accelerator.device,
+                            dtype=weight_dtype,
+                            seed= RuntimeConfig.seed,
+                            output_path= Path(RuntimeConfig.save_path, 'inference', f'step-{global_step}')
+                        )
 
+                        # set transformer back to training mode
+                        transformer.train()
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -415,10 +436,6 @@ def run_train():
                 logger.info("Reached max number of samples, stopping training.")
                 break
 
-        # we finished an epoch, we can run validation now
-        if accelerator.is_main_process:
-            # TODO: implement and run the validation pipeline!
-            pass
 
     logger.info("Training finished.")
 

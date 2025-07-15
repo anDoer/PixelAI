@@ -31,6 +31,12 @@ class RuntimeConfig:
     checkpointing_interval: int = 10000
     checkpoint_total_limit: Optional[int] = 10  # None for no limit, or an integer for the number of checkpoints to keep
 
+    # Inference config
+    inference_batch_size: int = 1
+    inference_num_samples: int = 5
+    inference_evaluation_interval: int = 10
+    inference_num_steps: int = 50  # number of inference steps
+
     # lr scheduler
     num_warmup_steps: int = 1000
     scheduler_name: str = 'linear'  # 'linear', 'cosine', 'constant'
