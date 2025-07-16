@@ -32,9 +32,9 @@ class RuntimeConfig:
     checkpoint_total_limit: Optional[int] = 10  # None for no limit, or an integer for the number of checkpoints to keep
 
     # Inference config
-    inference_batch_size: int = 1
-    inference_num_samples: int = 5
-    inference_evaluation_interval: int = 10
+    inference_batch_size: int = 4
+    inference_num_samples: int = 16
+    inference_evaluation_interval: int = 1000
     inference_num_steps: int = 50  # number of inference steps
 
     # lr scheduler
@@ -44,7 +44,7 @@ class RuntimeConfig:
 
     # i/o 
     dataset_path: str = '~/Data/Datasets/AIPixel'
-    save_path: str = 'output/train/'
+    save_path: str = 'output/train/v1/'
     logging_dir: str = 'logs'
 
     resume_from: Optional[str] = 'last'  # Path to a checkpoint to resume training from

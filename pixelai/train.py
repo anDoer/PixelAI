@@ -412,7 +412,9 @@ def run_train():
                     
                     if global_step % RuntimeConfig.inference_evaluation_interval == 0:
                         logger.info(f"Running inference at step {global_step}...")
+
                         # try to free some cuda cache
+                        transformer.eval()
                         torch.cuda.empty_cache()
                         inference_pipeline.run(
                             image_size=RuntimeConfig.default_train_image_size,

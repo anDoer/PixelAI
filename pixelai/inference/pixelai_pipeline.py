@@ -1,5 +1,5 @@
 import torch
-import argparse
+import os
 
 from tqdm import tqdm
 from typing import Tuple, Optional, List, Union
@@ -74,10 +74,6 @@ class InferencePipeline:
 
         output_images = []
 
-        # adjust the timesteps according to the number of inferecne steps
-        # this function considers the schedule shift 
-        self.scheduler.set_timesteps(num_inference_steps=num_inference_steps)
-
         for b_idx in range(num_batches):
             self.logger.info(f"Processing batch {b_idx + 1}/{num_batches}")
 
@@ -93,30 +89,33 @@ class InferencePipeline:
             sample = PixelTransformer._pack_latents(latents,
                                                     patch_size=RuntimeConfig.patch_size)
 
+            # adjust the timesteps according to the number of inferecne steps
+            # this function considers the schedule shift 
+            self.scheduler.set_timesteps(num_inference_steps=num_inference_steps)
             self.scheduler.set_begin_index(0)
 
             with tqdm(total=len(self.scheduler.timesteps), desc="Inference Progress") as progress_bar:
                 for t_idx, timestep in enumerate(self.scheduler.timesteps):
-                    
-                    timestep = timestep.expand(latents.shape[0]).to(latents.device)
+                    with torch.no_grad():
+                        timestep = timestep.expand(latents.shape[0]).to(latents.device)
 
-                    model_output = self.transformer(
-                        hidden_states=sample,
-                        timestep=timestep,
-                        img_ids=image_ids,
-                    )
+                        model_output = self.transformer(
+                            hidden_states=sample,
+                            timestep=timestep,
+                            img_ids=image_ids,
+                        )
 
-                    # update the sample using the scheduler
-                    sample = self.scheduler.step(
-                        model_output=model_output,
-                        timestep=timestep,
-                        sample=sample
-                    )
+                        # update the sample using the scheduler
+                        sample = self.scheduler.step(
+                            model_output=model_output,
+                            timestep=timestep,
+                            sample=sample
+                        )
 
-                    progress_bar.update(1)
+                        progress_bar.update(1)
             
             # unpack the latents to images
-            images = PixelTransformer.unpack_latents(
+            images = PixelTransformer._unpack_latents(
                 latents=sample,
                 height=height,
                 width=width,
@@ -136,6 +135,8 @@ class InferencePipeline:
 
         # Save images to output path
         self.logger.info(f"Saving output images to {output_path}")
+        os.makedirs(output_path, exist_ok=True)
+
         for idx, image in enumerate(output_images):
             image.save(f"{output_path}/image_{idx + 1}.png")
 

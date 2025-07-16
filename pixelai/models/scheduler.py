@@ -67,8 +67,13 @@ class FlowMatchEulerDiscreteScheduler:
         if timesteps is None:
             timesteps = sigmas * self.num_train_timesteps
 
+        sigmas = torch.cat([sigmas, torch.ones(1, device=sigmas.device)])
+
         self.timesteps = timesteps
         self.sigmas = sigmas
+
+        self._step_index = None
+        self._begin_index = None
 
     def step(self,
              model_output: torch.Tensor,
