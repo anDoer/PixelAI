@@ -1,10 +1,12 @@
 import torch
 import os
+import matplotlib.pyplot as plt
+from PIL import Image, ImageOps
+from pathlib import Path
 
 from tqdm import tqdm
 from typing import Tuple, Optional, List, Union
 from safetensors.torch import load_file
-from PIL import Image
 
 from pixelai.config.default import RuntimeConfig
 from pixelai.utils.logging import get_logger
@@ -140,3 +142,49 @@ class InferencePipeline:
         for idx, image in enumerate(output_images):
             image.save(f"{output_path}/image_{idx + 1}.png")
 
+        self.visualize_images(output_images,
+                              grid_size=(num_batches, batch_size),
+                              save_path=Path(output_path, "visualization.png"))
+
+    def visualize_images(self, 
+                         images: List[Image.Image], 
+                         grid_size: Tuple[int, int], 
+                         upscale_min_side: int = 128, 
+                         save_path: Optional[str] = None) -> None:
+        """
+        Visualizes a list of PIL images in a grid using matplotlib and optionally saves the figure.
+
+        Args:
+            images (List[Image.Image]): List of PIL images to visualize.
+            grid_size (Tuple[int, int]): Tuple specifying the grid dimensions (rows, cols).
+            upscale_min_side (int): Minimum size of the smallest side of the image after upscaling.
+            save_path (Optional[str]): Path to save the figure as a PNG image. If None, the figure is not saved.
+        """
+        rows, cols = grid_size
+        assert len(images) <= rows * cols, "Grid size is smaller than the number of images."
+
+        # Upscale images while maintaining aspect ratio
+        upscaled_images = []
+        for img in images:
+            scale_factor = upscale_min_side / min(img.size)
+            new_size = (int(img.width * scale_factor), int(img.height * scale_factor))
+            upscaled_images.append(img.resize(new_size, Image.Resampling.LANCZOS))
+
+        # Create the grid
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2))
+        axes = axes.flatten()
+
+        for ax, img in zip(axes, upscaled_images):
+            ax.imshow(img)
+            ax.axis('off')
+
+        # Hide unused subplots
+        for ax in axes[len(upscaled_images):]:
+            ax.axis('off')
+
+        plt.tight_layout()
+
+        # Save the figure if save_path is provided
+        if save_path:
+            self.logger.info(f"Saving visualization to {save_path}")
+            fig.savefig(save_path, format='png', bbox_inches='tight')

@@ -16,7 +16,7 @@ from safetensors.torch import save_file, load_file
 from pixelai.utils.logging import get_logger
 from pixelai.models.pixel_model import PixelTransformer
 from pixelai.datasets.data_reader import get_dataloader
-from pixelai.config.default import RuntimeConfig
+from pixelai.config.default import RuntimeConfig, RuntimeVariables
 from pixelai.models.scheduler import FlowMatchEulerDiscreteScheduler
 from pixelai.inference.pixelai_pipeline import InferencePipeline
 
@@ -29,7 +29,7 @@ def parse_args():
     return parser.parse_args()
 
 def setup_accelerator(logging_dir: Path):
-    accelerator_project_config = ProjectConfiguration(project_dir=RuntimeConfig.save_path,
+    accelerator_project_config = ProjectConfiguration(project_dir=RuntimeVariables.project_path,
                                                       logging_dir=logging_dir)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
@@ -40,13 +40,17 @@ def setup_accelerator(logging_dir: Path):
         kwargs_handlers=[kwargs]
     )
 
+    accelerator.init_trackers(
+        project_name=f"PixelAI-Training-{RuntimeConfig.version}",
+        #config=vars(RuntimeConfig)
+    )
+
     return accelerator
     
 def prepare_hooks(accelerator,
                   logger: logging.Logger):
     
     def save_model_hook(models, weights, output_dir):
-        import pdb; pdb.set_trace()
         if accelerator.is_main_process:
             logger.info(f"Saving model state to {output_dir}...")
 
@@ -134,7 +138,7 @@ def get_lr_scheduler(optimizer,
     scheduler = get_scheduler(
         name=RuntimeConfig.scheduler_name,
         optimizer=optimizer,
-        num_warmup_steps=RuntimeConfig.num_warmup_steps,
+        num_warmup_steps=num_warmup_steps_for_scheduler,
         num_training_steps=num_training_steps_for_scheduler,
         num_cycles=RuntimeConfig.num_scheduler_cycles,  # No cycles for now
     ) 
@@ -196,7 +200,11 @@ def run_train():
 
     # TODO: load config from file and override RuntimeConfig
 
-    logging_dir = Path(RuntimeConfig.save_path, RuntimeConfig.logging_dir)
+    # Setting up runtime variables
+    RuntimeVariables.project_path = Path(RuntimeConfig.save_path, RuntimeConfig.version)
+    RuntimeVariables.logging_path = Path(RuntimeVariables.project_path, RuntimeConfig.logging_dir)
+
+    logging_dir = RuntimeVariables.logging_path
     accelerator = setup_accelerator(logging_dir)
 
     if accelerator.is_main_process:
@@ -266,10 +274,10 @@ def run_train():
         if RuntimeConfig.resume_from != 'last':  
             ckpt = Path(RuntimeConfig.resume_from)
         else:
-            existing_ckpts = sorted(Path(RuntimeConfig.save_path, 'checkpoints').glob('checkpoint-*'))
+            existing_ckpts = sorted(Path(RuntimeVariables.project_path, 'checkpoints').glob('checkpoint-*'))
             ckpt = Path('last') if len(existing_ckpts) == 0 else existing_ckpts[-1]
 
-        ckpt_path = os.path.join(RuntimeConfig.save_path, 'checkpoints', ckpt.name)
+        ckpt_path = os.path.join(RuntimeVariables.project_path, 'checkpoints', ckpt.name)
         if not os.path.exists(ckpt_path):
 
             logger.warning(f"Checkpoint {ckpt_path} does not exist, starting from scratch.")
@@ -393,7 +401,7 @@ def run_train():
                 if accelerator.is_main_process:
                     if global_step % RuntimeConfig.checkpointing_interval == 0:
                         if RuntimeConfig.checkpoint_total_limit is not None:
-                            checkpoint_dirs = Path(RuntimeConfig.save_path, 'checkpoints').glob('checkpoint-*')
+                            checkpoint_dirs = Path(RuntimeVariables.project_path, 'checkpoints').glob('checkpoint-*')
                             checkpoint_dirs = sorted(checkpoint_dirs, key=lambda x: int(x.name.split('-')[1]))
 
                             if len(checkpoint_dirs) >= RuntimeConfig.checkpoint_total_limit:
@@ -401,12 +409,12 @@ def run_train():
                                 ckpts_to_remove = checkpoint_dirs[:num_to_remove]
 
                                 logger.info(f"{len(checkpoint_dirs)} checkpoints found, removing {num_to_remove} oldest checkpoints.")
-                                logger.info(f"removed checkpoints: {', '.join(ckpts_to_remove)}")
+                                logger.info(f"removed checkpoints: {ckpts_to_remove}")
 
                                 for ckpt_path in ckpts_to_remove:
                                     shutil.rmtree(ckpt_path)
                         
-                        save_path = Path(RuntimeConfig.save_path, 'checkpoints', f'checkpoint-{global_step}')
+                        save_path = Path(RuntimeVariables.project_path, 'checkpoints', f'checkpoint-{global_step}')
                         accelerator.save_state(save_path)
                         logger.info(f"Saved checkpoint to {save_path}")
                     
@@ -424,10 +432,11 @@ def run_train():
                             device= accelerator.device,
                             dtype=weight_dtype,
                             seed= RuntimeConfig.seed,
-                            output_path= Path(RuntimeConfig.save_path, 'inference', f'step-{global_step}')
+                            output_path= Path(RuntimeVariables.project_path, 'inference', f'step-{global_step}')
                         )
 
                         # set transformer back to training mode
+                        torch.cuda.empty_cache()
                         transformer.train()
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}

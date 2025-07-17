@@ -63,7 +63,11 @@ class Dataset(Dataset):
         
 
     def __len__(self):
-        return len(self.samples)
+        if RuntimeConfig.debug_mode:
+            return min(RuntimeConfig.debug_num_samples, len(self.samples))
+        else:
+            return len(self.samples)
+        #return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict:
         sample = self.samples[idx]
