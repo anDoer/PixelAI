@@ -1,4 +1,4 @@
-import os
+import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Dict
 from PIL import Image
@@ -23,10 +23,17 @@ class Dataset(Dataset):
 
         self.transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            transforms.Normalize(mean=(0.5, 0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5, 0.5))
         ])
 
         self.load_data()
+
+    def zero_alpha_channel(self, image: Image.Image) -> Image.Image:
+        assert image.mode == 'RGBA', "Image must be in RGBA mode to zero the alpha channel."
+        np_image = np.array(image)
+        import pdb; pdb.set_trace()
+        np_image[np_image[:, :, 3] == 0, :3] = 0
+        return Image.fromarray(np_image)
 
     def load_data(self):
 
@@ -73,10 +80,12 @@ class Dataset(Dataset):
         sample = self.samples[idx]
 
         # load image 
-        image = Image.open(sample['image_path']).convert('RGB')
+        image = Image.open(sample['image_path']).convert('RGBA')
+        image = self.zero_alpha_channel(image)
         resized_image, resize_meta = resize_with_aspect_ratio(image,
                                                               target_size=RuntimeConfig.default_train_image_size,
-                                                              fill_value=(0, 0, 0))
+                                                              fill_value=(0, 0, 0, 0))
+
         image_tensor = self.transform(resized_image)
 
         train_item = {
@@ -84,10 +93,22 @@ class Dataset(Dataset):
             'image_size': torch.tensor(resize_meta['target_size']),
             'original_size': torch.tensor(resize_meta['original_size']),
             'image_offsets': torch.tensor(resize_meta['offsets']),
+            'game_class_idx': torch.tensor(sample['game_class_idx'], dtype=torch.long),
         }
 
         return train_item
 
+    def _get_anomaly_samples(self,
+                             resolution: Tuple[int, int]) -> List[str]:
+        anomaly_samples = list()
+        for sample in self.samples:
+            img = Image.open(sample['image_path'])
+            width, height = img.size
+            
+            if width > resolution[0] or height > resolution[1]:
+                anomaly_samples.append(sample['image_path'])
+        return anomaly_samples
+                
     def _get_statistics(self, return_stats: bool = False) -> Tuple[List[int], Dict[int, List[int]], Dict[str, Dict]]:
         """
         Collect statistics about the dataset, specifically image sizes.
@@ -139,10 +160,20 @@ def get_dataloader():
 if __name__ == '__main__':
     dataset = Dataset(data_path='/home/doering/Data/Datasets/AIPixel')
 
-    _, _, stats = dataset._get_statistics(return_stats=True)
-    plot_cluster_statistics(stats, 
-                            output_folder='output/dataset_stats/', 
-                            filename='cluster_statistics.png')
+    dataset[0]
+
+    import pdb; pdb.set_trace()
+
+    #_, _, stats = dataset._get_statistics(return_stats=True)
+
+    #anomaly_samples = dataset._get_anomaly_samples(resolution=(350, 350))
+    #with open('output/anomaly_samples.txt', 'w') as f:
+    #    for sample in anomaly_samples:
+    #        f.write(f"{sample}\n")
+
+    #plot_cluster_statistics(stats, 
+    #                        output_folder='output/dataset_stats/', 
+    #                        filename='cluster_statistics.png')
 
     #from torch.utils.data import DataLoader
     #dataloader = DataLoader(dataset, 

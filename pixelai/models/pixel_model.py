@@ -119,6 +119,9 @@ class PixelTransformer(nn.Module):
                 joint_attention_kwargs: Optional[Dict[str, Any]] = None,
                 ) -> torch.Tensor:
         
+        if self.num_classes and conditions is None:
+            raise ValueError("Conditions must be provided when num_classes is set")
+
         hidden_states = self.input_embed(hidden_states)
         timestep = timestep.to(hidden_states.dtype)
 

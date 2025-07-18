@@ -103,7 +103,7 @@ def cluster_image_sizes(image_sizes: List[Tuple[int, int]],
 
 def plot_cluster_statistics(cluster_stats: Dict, 
                             output_folder: 
-                                str, filename: str = "cluster_statistics.png"):
+                            str, filename: str = "cluster_statistics.png"):
     """
     Generate a bar plot showing the cluster statistics.
     

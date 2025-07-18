@@ -5,6 +5,18 @@ from typing import Optional
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 from diffusers.models.activations import FP32SiLU
 
+class ClassConditionModel(nn.Module):
+    def __init__(self,
+                 num_classes: int,
+                 embedding_dim: int):
+        
+        super().__init__()
+        self.num_classes = num_classes
+        self.class_embedding = nn.Embedding(num_classes, embedding_dim)
+
+    def forward(self, class_ids: torch.Tensor) -> torch.Tensor:
+        return self.class_embedding(class_ids)
+
 
 class ConditionProjection(nn.Module):
     def __init__(self, 

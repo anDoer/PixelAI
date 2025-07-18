@@ -5,6 +5,7 @@ import logging
 import argparse
 import shutil
 
+from typing import Optional
 from tqdm import tqdm
 from pathlib import Path
 from accelerate import Accelerator
@@ -19,6 +20,8 @@ from pixelai.datasets.data_reader import get_dataloader
 from pixelai.config.default import RuntimeConfig, RuntimeVariables
 from pixelai.models.scheduler import FlowMatchEulerDiscreteScheduler
 from pixelai.inference.pixelai_pipeline import InferencePipeline
+from pixelai.utils.model_utils import count_trainable_parameters
+from pixelai.models.embeddings import ClassConditionModel
 
 
 def parse_args():
@@ -42,7 +45,7 @@ def setup_accelerator(logging_dir: Path):
 
     accelerator.init_trackers(
         project_name=f"PixelAI-Training-{RuntimeConfig.version}",
-        #config=vars(RuntimeConfig)
+        config=dict(num_trainable_parameters=RuntimeVariables.num_trainable_parameters)
     )
 
     return accelerator
@@ -59,6 +62,8 @@ def prepare_hooks(accelerator,
                 if isinstance(model, PixelTransformer):
                     # Save the model state using safetensors
                     save_file(accelerator.unwrap_model(model).state_dict(), Path(output_dir, 'transformer.safetensors'))
+                elif isinstance(model, ClassConditionModel):
+                    save_file(accelerator.unwrap_model(model).state_dict(), Path(output_dir, 'class_condition_model.safetensors'))
                 else:
                     logger.warning(f"Model {model} is not a PixelTransformer, skipping save.")
 
@@ -73,6 +78,10 @@ def prepare_hooks(accelerator,
                 state_dict = load_file(Path(input_dir, 'transformer.safetensors'))
                 model.load_state_dict(state_dict)
 
+                del state_dict
+            if isinstance(model, ClassConditionModel):
+                state_dict = load_file(Path(input_dir, 'class_condition_model.safetensors'))
+                model.load_state_dict(state_dict)
                 del state_dict
 
     logger.info("Registering save and load state hooks for the model...")
@@ -90,22 +99,46 @@ def initialize_model(logger: logging.Logger,
         num_layers=RuntimeConfig.num_layers,
         attention_head_dim=RuntimeConfig.attention_head_dim,
         num_attention_heads=RuntimeConfig.num_attention_heads,
-        axes_dims_rope=RuntimeConfig.axes_dims_rope
+        axes_dims_rope=RuntimeConfig.axes_dims_rope,
+        num_classes=RuntimeConfig.num_classes if RuntimeConfig.num_classes > 0 else None,
     )
 
+    if RuntimeConfig.num_classes > 0:
+        logger.info(f"Initialize  class condition model with {RuntimeConfig.num_classes} classes.")
+        class_cond_model = ClassConditionModel(
+            num_classes=RuntimeConfig.num_classes,
+            embedding_dim=model.inner_dim
+        )
+
+        class_cond_model.to(accelerator.device, dtype=weight_dtype)
+
+    RuntimeVariables.num_trainable_parameters = count_trainable_parameters(model)
+    logger.info(f"Model initialized with {RuntimeVariables.num_trainable_parameters / 10**6:.2f} M trainable parameters.")
     logger.info(f"Using weight dtype: {weight_dtype}")
+
     model = model.to(accelerator.device, dtype=weight_dtype)
 
-    return model
+    if RuntimeConfig.num_classes > 0:
+        return (model, class_cond_model)
+
+    return (model,)
 
 def prepare_optimizer(transformer: PixelTransformer,
-                      logger: logging.Logger):
+                      logger: logging.Logger,
+                      condition_model: Optional[ClassConditionModel] = None):
 
     logger.info("Preparing optimizer...")
     transformer_params = {"params": transformer.parameters(), 
                           "lr": RuntimeConfig.learning_rate,}
 
     parameters_to_optimize = [transformer_params]
+
+    if condition_model:
+        cond_params = {"params": condition_model.parameters(),
+                       "lr": RuntimeConfig.learning_rate,}
+
+        parameters_to_optimize.append(cond_params)
+
 
     optimizer = torch.optim.AdamW(
         parameters_to_optimize,
@@ -194,7 +227,26 @@ def compute_loss(model_pred: torch.Tensor,
     loss = loss.reshape(loss.shape[0], -1).mean(dim=1).mean()
 
     return loss
-    
+
+def prepare_for_training(accelerator,
+                         transformer,
+                         optimizer,
+                         dataloader,
+                         lr_scheduler,
+                         cond_model = None):
+
+    to_prepare = [transformer, optimizer, dataloader, lr_scheduler]
+
+    if cond_model is not None:
+        to_prepare.append(cond_model)
+
+    prepared = accelerator.prepare(*to_prepare)
+
+    if cond_model is None:
+        prepared.append(None)
+
+    return prepared  
+
 def run_train():
     args = parse_args() 
 
@@ -231,10 +283,12 @@ def run_train():
                   logger=logger)
 
     # initialize the transformer model
-    transformer = initialize_model(logger, accelerator, weight_dtype=weight_dtype)
+    models = initialize_model(logger, accelerator, weight_dtype=weight_dtype)
+    transformer = models[0]
+    cond_model = models[1] if len(models) > 1 else None
 
     # Prepare Optimizer
-    optimizer = prepare_optimizer(transformer, logger)
+    optimizer = prepare_optimizer(transformer, logger, condition_model=cond_model)
 
     # Prepare Dataset
     logger.info("Preparing dataset...")
@@ -244,8 +298,13 @@ def run_train():
     lr_scheduler = get_lr_scheduler(optimizer=optimizer, accelerator=accelerator, logger=logger, dataloader=dataloader)
 
     # prepare for training 
-    transformer, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-        transformer, optimizer, dataloader, lr_scheduler
+    transformer, optimizer, dataloader, lr_scheduler, cond_model = prepare_for_training(
+        accelerator=accelerator,
+        transformer=transformer,
+        optimizer=optimizer,
+        dataloader=dataloader,
+        lr_scheduler=lr_scheduler,
+        cond_model=cond_model
     )
 
     # Recalculate the total numer of training steps
@@ -304,7 +363,8 @@ def run_train():
     generator = torch.Generator().manual_seed(RuntimeConfig.seed)
 
     # Initialize validation pipeline
-    inference_pipeline = InferencePipeline(model=accelerator.unwrap_model(transformer))
+    inference_pipeline = InferencePipeline(model=accelerator.unwrap_model(transformer),
+                                           condition_model=accelerator.unwrap_model(cond_model) if cond_model is not None else None)
 
     for epoch in range(first_epoch, RuntimeConfig.num_epochs):
         transformer.train()
@@ -315,13 +375,24 @@ def run_train():
             with accelerator.accumulate(transformer):
                 images = batch['images']
 
-                image_sizes = batch['image_sizes'].to(dtype=weight_dtype)
-                original_sizes = batch['original_sizes'].to(dtype=weight_dtype)
-                image_offsets = batch['image_offsets'].to(dtype=weight_dtype)
+                #image_sizes = batch['image_sizes'].to(dtype=weight_dtype)
+                #original_sizes = batch['original_sizes'].to(dtype=weight_dtype)
+                #image_offsets = batch['image_offsets'].to(dtype=weight_dtype)
+
+                game_class_indices = batch['game_class_idxs'].to(dtype=torch.long)
+
+                cond_embeddings = None 
+                if cond_model is not None:
+                    cond_embeddings = cond_model(game_class_indices)
+
+                    # Randomly set class embeddings to zero with a dropout rate
+                    if RuntimeConfig.class_droput > 0:
+                        class_dropout_mask = torch.bernoulli(torch.ones_like(game_class_indices, dtype=torch.float) * RuntimeConfig.class_droput).bool()
+                        cond_embeddings[class_dropout_mask] = 0.0
 
                 # TODO: encode this as additional condition similar to what has been done in SDXL
                 #       or think about a better method!
-                image_size_condition = torch.cat([image_sizes, original_sizes, image_offsets], dim=-1)
+                #image_size_condition = torch.cat([image_sizes, original_sizes, image_offsets], dim=-1)
 
                 # prepare the image ids
                 image_ids = PixelTransformer._prepare_latent_image_ids(
@@ -370,7 +441,9 @@ def run_train():
                 model_pred = transformer(
                     hidden_states=noisy_input_packed,
                     timestep=timesteps.to(accelerator.device),
-                    img_ids=image_ids)
+                    img_ids=image_ids,
+                    conditions=cond_embeddings, 
+                    )
 
                 # unpack
                 model_pred = PixelTransformer._unpack_latents(

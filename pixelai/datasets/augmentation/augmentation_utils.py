@@ -2,7 +2,7 @@ from PIL import Image
 
 def resize_with_aspect_ratio(image: Image.Image,
                              target_size: tuple[int, int],
-                             fill_value: tuple[int, int, int] = (0, 0, 0)) -> tuple[Image.Image, dict]:
+                             fill_value: tuple[int, int, int] = (0, 0, 0, 0)) -> tuple[Image.Image, dict]:
     """
     Resize an image to target resolution while preserving aspect ratio.
     Adds borders if necessary to match exact target dimensions.
@@ -31,7 +31,7 @@ def resize_with_aspect_ratio(image: Image.Image,
     resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
     
     # Create new image with target dimensions and paste resized image centered
-    final_image = Image.new('RGB', target_size, (0, 0, 0))  # Black background
+    final_image = Image.new('RGBA', target_size, (0, 0, 0, 0))  # Black background
     
     # Calculate position to center the resized image
     x_offset = (target_width - new_width) // 2

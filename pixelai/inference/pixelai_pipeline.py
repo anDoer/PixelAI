@@ -1,7 +1,7 @@
 import torch
 import os
 import matplotlib.pyplot as plt
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 from pathlib import Path
 
 from tqdm import tqdm
@@ -11,11 +11,26 @@ from safetensors.torch import load_file
 from pixelai.config.default import RuntimeConfig
 from pixelai.utils.logging import get_logger
 from pixelai.models.pixel_model import PixelTransformer
+from pixelai.models.embeddings import ClassConditionModel
 from pixelai.models.scheduler import FlowMatchEulerDiscreteScheduler
+
+def convert_latents_to_images(images: List[torch.Tensor],
+                              class_ids: Optional[List[torch.Tensor]]) -> List[Image.Image]:
+    # Convert images to PIL format
+    images = images.to("cpu", dtype=torch.float32)
+    images = images.clamp(-1, 1)
+    images = (images + 1) / 2.0
+    images = images.permute(0, 2, 3, 1)
+    images = (images * 255).to(torch.uint8)
+    images = images.numpy()
+    images = [Image.fromarray(image) for image in images]
+
+    return images
 
 class InferencePipeline:
     def __init__(self, 
                  model: Union[str, PixelTransformer],
+                 condition_model: Optional[ClassConditionModel] = None,
                  device = None,
                  weight_dtype = None,
                  **model_kwargs):
@@ -24,9 +39,13 @@ class InferencePipeline:
 
         if isinstance(model, PixelTransformer):
             self.transformer = model
+            self.condition_model = condition_model
         else:
             self.logger.info(f"Loading model from {model}")
             state_dict = load_file(model)
+
+            if condition_model is not None:
+                raise NotImplementedError("Condition model is not supported in this pipeline yet.")
 
             self.transformer = PixelTransformer(
                 patch_size=RuntimeConfig.patch_size if 'patch_size' not in model_kwargs else model_kwargs['patch_size'],
@@ -79,7 +98,15 @@ class InferencePipeline:
         for b_idx in range(num_batches):
             self.logger.info(f"Processing batch {b_idx + 1}/{num_batches}")
 
-            latents = torch.randn((batch_size, 3, height, width), device=device, dtype=dtype, generator=generator)
+            latents = torch.randn((batch_size, 4, height, width), device=device, dtype=dtype, generator=generator)
+
+            cond_embeddings = None
+            class_ids = None
+
+            if self.condition_model is not None:
+                # randomly sample class embeddings between 0 and num_classes
+                class_ids = torch.randint(0, self.condition_model.num_classes, (batch_size,), device=device)
+                cond_embeddings = self.condition_model(class_ids=class_ids)
 
             image_ids = PixelTransformer._prepare_latent_image_ids(
                 height=height,
@@ -105,6 +132,8 @@ class InferencePipeline:
                             hidden_states=sample,
                             timestep=timestep,
                             img_ids=image_ids,
+                            conditions=cond_embeddings,
+
                         )
 
                         # update the sample using the scheduler
@@ -124,15 +153,8 @@ class InferencePipeline:
                 patch_size=RuntimeConfig.patch_size
             )
 
-            # Convert images to PIL format
-            images = images.to("cpu", dtype=torch.float32)
-            images = images.clamp(-1, 1)
-            images = (images + 1) / 2.0
-            images = images.permute(0, 2, 3, 1)
-            images = (images * 255).to(torch.uint8)
-            images = images.numpy()
-            images = [Image.fromarray(image) for image in images]
-
+            images = convert_latents_to_images(images,
+                                               class_ids=class_ids)
             output_images += images
 
         # Save images to output path
