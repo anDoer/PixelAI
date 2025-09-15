@@ -1,1 +1,3 @@
 # PixelAI
+
+Work in Progress! For now, this is just a scientific playground. More to come...
